@@ -7,6 +7,9 @@ owns the retry policy so attempts are bounded and counted in one place.
 from __future__ import annotations
 
 from typing import Any, Optional
+from email.utils import parsedate_to_datetime
+import math
+import time
 
 from reviewharness.config import ConfigError, Settings
 from reviewharness.llm.base import (
@@ -23,6 +26,58 @@ from reviewharness.logging_setup import redact
 MAX_COMPLETION_TOKENS = 4096
 
 
+def _retry_delay(exc: Exception) -> float | None:
+    """Read public response headers; reject invalid or negative delay values.
+
+    retry-after-ms has precedence when valid; otherwise retry-after accepts
+    seconds or HTTP dates. No SDK-private helpers or secrets are used.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+
+    def header(name: str) -> str | None:
+        try:
+            value = headers.get(name)
+            if value is None:
+                value = next((v for k, v in headers.items() if str(k).lower() == name), None)
+            return value if isinstance(value, str) else None
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def valid(number: float) -> bool:
+        return math.isfinite(number) and number >= 0
+
+    ms = header("retry-after-ms")
+    if ms is not None:
+        try:
+            value = float(ms.strip()) / 1000
+            if valid(value):
+                return value
+        except ValueError:
+            pass
+
+    seconds = header("retry-after")
+    if seconds is not None:
+        try:
+            value = float(seconds.strip())
+            if valid(value):
+                return value
+        except ValueError:
+            pass
+        try:
+            date = parsedate_to_datetime(seconds.strip())
+            if date.tzinfo is None:
+                return None
+            value = date.timestamp() - time.time()
+            if math.isfinite(value):
+                return max(0.0, value)
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
 def translate_error(exc: Exception) -> LLMError:
     """Map an SDK exception to our hierarchy without importing the SDK.
 
@@ -36,7 +91,7 @@ def translate_error(exc: Exception) -> LLMError:
         return LLMTimeoutError(f"provider timeout: {msg}")
     if isinstance(status, int):
         if status == 429 or status >= 500:
-            return LLMTransientError(f"provider returned HTTP {status}: {msg}")
+            return LLMTransientError(f"provider returned HTTP {status}: {msg}", retry_after_s=_retry_delay(exc))
         return LLMPermanentError(f"provider rejected the request (HTTP {status}): {msg}")
     if "Connection" in name:
         return LLMTransientError(f"provider connection error: {msg}")

@@ -198,3 +198,40 @@ def test_repository_cannot_forge_our_delimiters(tmp_path, make_settings):
     user_lines = p.calls[0][1].splitlines()
     assert user_lines.count("##### END FILE #####") == user_lines.count("##### FILE evil.py (lines 1-3 of 3) #####") == 1
     assert user_lines.count("SPECIALIST: bug") == 1
+
+# ---------------------------------------------------------------- Phase 8 provider-aware retries
+def test_provider_retry_delay_overrides_backoff(env):
+    delays = []
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=2.5), EMPTY])
+    r = run(env, SpecialistSource.SECURITY, p, sleep=delays.append)
+    assert r.status is TaskStatus.SUCCEEDED
+    assert delays == [2.5] and r.attempts == 2
+
+
+def test_provider_delay_over_safe_limit_fails_without_second_call(env):
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=30), EMPTY])
+    r = run(env, SpecialistSource.SECURITY, p)
+    assert r.status is TaskStatus.FAILED
+    assert r.attempts == 1 and len(p.calls) == 1
+    assert "safe wait bound" in r.error
+
+
+def test_provider_delay_over_task_budget_fails_without_second_call(env, make_settings):
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=3), EMPTY])
+    r = run(env, SpecialistSource.SECURITY, p, settings=make_settings(task_timeout_s=1))
+    assert r.status is TaskStatus.FAILED and r.attempts == 1
+    assert len(p.calls) == 1 and "task budget" in r.error
+
+
+def test_invalid_retry_metadata_uses_backoff(env):
+    delays = []
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=float("nan")), EMPTY])
+    r = run(env, SpecialistSource.SECURITY, p, sleep=delays.append)
+    assert r.status is TaskStatus.SUCCEEDED and delays == [0.5]
+
+
+def test_provider_delay_not_used_after_retry_exhausted(env, make_settings):
+    delays = []
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=5), EMPTY])
+    r = run(env, SpecialistSource.SECURITY, p, sleep=delays.append, settings=make_settings(max_retries=0))
+    assert r.status is TaskStatus.FAILED and len(p.calls) == 1 and delays == []

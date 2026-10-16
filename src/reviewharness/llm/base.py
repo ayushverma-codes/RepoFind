@@ -10,7 +10,11 @@ class LLMError(Exception):
 
 
 class LLMTransientError(LLMError):
-    """Worth retrying: rate limit, 5xx, connection problem."""
+    """Transient failure, optionally carrying a server-requested delay in seconds."""
+
+    def __init__(self, message: str, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
 
 
 class LLMTimeoutError(LLMTransientError):

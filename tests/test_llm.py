@@ -129,3 +129,46 @@ def test_scripted_provider_replays_and_raises():
     with pytest.raises(RuntimeError):
         p.complete("s", "u")
     assert len(p.calls) == 3
+
+@pytest.mark.parametrize("headers, expected", [
+    ({"retry-after-ms": "1250"}, 1.25),
+    ({"retry-after": "3"}, 3.0),
+    ({"retry-after-ms": "bad", "retry-after": "4"}, 4.0),
+    ({"retry-after-ms": "-5", "retry-after": "2"}, 2.0),
+    ({"retry-after-ms": "inf", "retry-after": "nan"}, None),
+    ({"retry-after": "garbage"}, None),
+])
+def test_retry_header_parsing(headers, expected):
+    exc = StatusError(429)
+    exc.response = SimpleNamespace(headers=headers)
+    translated = translate_error(exc)
+    assert isinstance(translated, LLMTransientError)
+    assert translated.retry_after_s == expected
+
+
+def test_retry_after_http_date(monkeypatch):
+    from reviewharness.llm import groq_provider
+    monkeypatch.setattr(groq_provider.time, "time", lambda: 1_700_000_000)
+    from email.utils import formatdate
+    exc = StatusError(503)
+    exc.response = SimpleNamespace(headers={"retry-after": formatdate(1_700_000_005, usegmt=True)})
+    assert translate_error(exc).retry_after_s == 5
+
+
+def test_auth_and_bad_request_never_receive_retry_delay():
+    for status in (400, 401):
+        exc = StatusError(status)
+        exc.response = SimpleNamespace(headers={"retry-after": "2"})
+        assert isinstance(translate_error(exc), LLMPermanentError)
+
+
+def test_header_errors_redact_secrets():
+    exc = StatusError(429, "gsk_abcdefghijklmnop1234")
+    exc.response = SimpleNamespace(headers={"retry-after": "2"})
+    err = translate_error(exc)
+    assert err.retry_after_s == 2
+    assert "gsk_abcdefghijklmnop1234" not in str(err)
+
+
+def test_existing_transient_constructor_compatible():
+    assert LLMTransientError("temporary").retry_after_s is None

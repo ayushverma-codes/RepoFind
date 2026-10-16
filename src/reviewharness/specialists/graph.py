@@ -5,7 +5,7 @@
                 +--retry---+      (also call_llm -> call_llm on transient errors)
 
 Attempts are bounded (settings.max_retries + 1). Transient provider errors get a
-capped exponential backoff; malformed replies are retried once per attempt with a
+capped exponential backoff (or a valid provider delay); malformed replies are retried once per attempt with a
 corrective note. A permanent error stops immediately. review() never raises for
 provider problems: it returns a FAILED/TIMED_OUT result so a caller can tell
 "the review broke" apart from "the review found nothing".
@@ -13,6 +13,7 @@ provider problems: it returns a FAILED/TIMED_OUT result so a caller can tell
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Callable, TypedDict
@@ -50,6 +51,7 @@ class ReviewState(TypedDict, total=False):
     rejected: list
     prompt_tokens: int
     completion_tokens: int
+    retry_after_s: float | None
 
 
 def _build_graph(call_node: Callable, parse_node: Callable):
@@ -95,23 +97,41 @@ def review(
     system = system_prompt(specialist)
     base_user = user_prompt(specialist, context, excerpts)
 
-    def retry_or_fail(state: ReviewState, attempt: int, kind: str, message: str, feedback: str = "") -> ReviewState:
+    def retry_or_fail(
+        state: ReviewState, attempt: int, kind: str, message: str,
+        feedback: str = "", retry_after_s: float | None = None,
+    ) -> ReviewState:
         outcome = "retry" if attempt < max_attempts else "failed"
         log.warning("%s attempt %d/%d failed (%s): %s", specialist.value, attempt, max_attempts, kind, redact(message))
-        return {"attempt": attempt, "outcome": outcome, "error": message, "error_kind": kind, "feedback": feedback}
+        return {"attempt": attempt, "outcome": outcome, "error": message, "error_kind": kind, "feedback": feedback, "retry_after_s": retry_after_s}
 
     def call_llm(state: ReviewState) -> ReviewState:
         attempt = state.get("attempt", 0) + 1
         if attempt > 1 and state.get("error_kind") in ("timeout", "transient"):
-            sleep(min(BACKOFF_BASE_S * 2 ** (attempt - 2), BACKOFF_CAP_S))
+            backoff = min(BACKOFF_BASE_S * 2 ** (attempt - 2), BACKOFF_CAP_S)
+            requested = state.get("retry_after_s")
+            # Provider delay is authoritative, not capped to a smaller delay.
+            # If it is too long, fail without violating the server's request.
+            if requested is not None and isinstance(requested, (int, float)) and not isinstance(requested, bool):
+                if math.isfinite(requested) and requested >= 0:
+                    backoff = requested
+            remaining = settings.task_timeout_s - (time.monotonic() - started)
+            if backoff > BACKOFF_CAP_S or backoff >= remaining:
+                reason = (f"retry delay {backoff:g}s exceeds safe wait bound {BACKOFF_CAP_S:g}s"
+                          if backoff > BACKOFF_CAP_S else
+                          f"retry delay {backoff:g}s exceeds remaining task budget")
+                log.warning("%s: %s", specialist.value, reason)
+                return {"attempt": attempt - 1, "outcome": "failed", "error": reason,
+                        "error_kind": "transient", "retry_after_s": None}
+            sleep(backoff)
         feedback = state.get("feedback", "")
         user = base_user + (repair_note(feedback) if feedback else "")
         try:
             result = provider.complete(system, user)
         except LLMTimeoutError as exc:
-            return retry_or_fail(state, attempt, "timeout", str(exc))
+            return retry_or_fail(state, attempt, "timeout", str(exc), retry_after_s=exc.retry_after_s)
         except LLMTransientError as exc:
-            return retry_or_fail(state, attempt, "transient", str(exc))
+            return retry_or_fail(state, attempt, "transient", str(exc), retry_after_s=exc.retry_after_s)
         except LLMResponseError as exc:
             return retry_or_fail(state, attempt, "response", str(exc), feedback=str(exc))
         except LLMError as exc:
@@ -124,6 +144,7 @@ def review(
             "error": "",
             "error_kind": "",
             "feedback": "",
+            "retry_after_s": None,
             "prompt_tokens": state.get("prompt_tokens", 0) + result.prompt_tokens,
             "completion_tokens": state.get("completion_tokens", 0) + result.completion_tokens,
         }
