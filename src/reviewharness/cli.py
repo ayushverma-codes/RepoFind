@@ -11,9 +11,11 @@ from dotenv import load_dotenv
 from pydantic import ValidationError
 
 from reviewharness import __version__
-from reviewharness.config import Settings
+from reviewharness.config import ConfigError, Settings
 from reviewharness.ingest import IngestError, IngestResult, ingest_repository
+from reviewharness.ingest.pipeline import write_json_atomic
 from reviewharness.ingest.snapshot import snapshot_dir
+from reviewharness.llm import make_provider
 from reviewharness.logging_setup import setup_logging
 from reviewharness.models import (
     CheckerStatus,
@@ -25,7 +27,9 @@ from reviewharness.models import (
     RunRecord,
     RunStatus,
     SpecialistSource,
+    TaskStatus,
 )
+from reviewharness.specialists import SpecialistResult, review as run_specialist
 
 
 def _format_errors(exc: ValidationError) -> str:
@@ -150,6 +154,69 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+_SPECIALISTS = {
+    "bug": [SpecialistSource.BUG],
+    "security": [SpecialistSource.SECURITY],
+    "testing": [SpecialistSource.TESTING_MAINTAINABILITY],
+    "baseline": [SpecialistSource.BASELINE],
+    "all": [SpecialistSource.BUG, SpecialistSource.SECURITY, SpecialistSource.TESTING_MAINTAINABILITY],
+}
+
+
+def format_review_summary(snapshot_id: str, results: list[SpecialistResult]) -> str:
+    lines = [f"Review of {snapshot_id} (Phase 3: specialists run one after another; findings are unchecked candidates)"]
+    for r in results:
+        cov = r.coverage
+        lines.append(
+            f"{r.specialist.value}: {r.status.value} - {len(r.findings)} finding(s), {len(r.rejected)} rejected, "
+            f"attempts={r.attempts}, tokens={r.prompt_tokens}/{r.completion_tokens}, {r.duration_s}s "
+            f"[{r.provider}:{r.model}]"
+        )
+        lines.append(
+            f"  coverage: reviewed={len(cov.reviewed)} truncated={len(cov.truncated)} omitted={len(cov.omitted)}"
+        )
+        if r.error:
+            lines.append(f"  error: {r.error}")
+        for f in r.findings:
+            lines.append(f"  [{f.severity.value}] {f.finding_id} {f.title} ({f.file_path}:{f.start_line}-{f.end_line}) conf={f.confidence}")
+        for rej in r.rejected:
+            lines.append(f"  rejected: {rej.title} - {rej.reason}")
+    return "\n".join(lines)
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    if args.test_mode:
+        settings = settings.model_copy(update={"test_mode": True})
+    try:
+        provider = make_provider(settings)
+        ingest = ingest_repository(args.source, _INGEST_TYPES[args.type], settings, run_tools=False)
+        root = Path(ingest.snapshot.tree_path)
+        out_dir = snapshot_dir(ingest.snapshot) / "reviews"
+        out_dir.mkdir(exist_ok=True)
+        results: list[SpecialistResult] = []
+        for specialist in _SPECIALISTS[args.specialist]:
+            result = run_specialist(specialist, root, ingest.inventory, ingest.context, provider, settings)
+            write_json_atomic(out_dir / f"{specialist.value}.json", result)
+            results.append(result)
+    except ConfigError as exc:
+        print(f"CONFIG ERROR: {exc}", file=sys.stderr)
+        return 2
+    except ValidationError as exc:
+        print("Invalid input:\n" + _format_errors(exc), file=sys.stderr)
+        return 2
+    except IngestError as exc:
+        print(f"INGEST FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print("[" + ",".join(r.model_dump_json() for r in results) + "]")
+    else:
+        print(format_review_summary(ingest.snapshot.snapshot_id, results))
+        print(f"Results: {out_dir}")
+    return 0 if all(r.status is TaskStatus.SUCCEEDED for r in results) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reviewharness", description="Multi-agent repository review harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -168,6 +235,14 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--no-tools", action="store_true", help="skip static-analysis tools")
     ing.add_argument("--json", action="store_true", help="print the full result as JSON")
     ing.set_defaults(func=_cmd_ingest)
+
+    rv = sub.add_parser("review", help="run specialist reviewer(s) on a repository")
+    rv.add_argument("source", help="GitHub URL, .zip file or local folder")
+    rv.add_argument("--type", choices=sorted(_INGEST_TYPES), default="auto", help="input type (default: auto-detect)")
+    rv.add_argument("--specialist", choices=sorted(_SPECIALISTS), default="all", help="which reviewer(s) to run")
+    rv.add_argument("--test-mode", action="store_true", help="use the deterministic fake provider (no API key)")
+    rv.add_argument("--json", action="store_true", help="print results as JSON")
+    rv.set_defaults(func=_cmd_review)
     return parser
 
 
