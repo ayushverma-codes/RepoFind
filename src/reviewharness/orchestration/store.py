@@ -18,8 +18,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from reviewharness.checking.models import INCOMPLETE_CODES, FindingOutcome
 from reviewharness.logging_setup import redact
 from reviewharness.models import (
+    CheckerDecision,
     Finding,
     RepositoryInput,
     ReviewTask,
@@ -68,6 +70,32 @@ CREATE TABLE IF NOT EXISTS candidate_findings (
     finding_json TEXT NOT NULL,
     PRIMARY KEY (run_id, finding_id)
 );
+CREATE TABLE IF NOT EXISTS finding_outcomes (
+    run_id TEXT NOT NULL REFERENCES runs(run_id),
+    finding_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    revisions INTEGER NOT NULL DEFAULT 0,
+    finding_json TEXT NOT NULL,
+    original_json TEXT,
+    outcome_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, finding_id)
+);
+CREATE TABLE IF NOT EXISTS checker_decisions (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    verdict TEXT NOT NULL,
+    reasoning TEXT NOT NULL,
+    counterexample TEXT,
+    decided_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS decisions_no_update BEFORE UPDATE ON checker_decisions
+BEGIN SELECT RAISE(ABORT, 'checker decisions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS decisions_no_delete BEFORE DELETE ON checker_decisions
+BEGIN SELECT RAISE(ABORT, 'checker decisions are append-only'); END;
 CREATE TABLE IF NOT EXISTS events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL,
@@ -305,6 +333,68 @@ class RunStore:
             except InvalidTransition:
                 continue  # finished concurrently; leave it alone
         return swept
+
+    # ------------------------------------------------------- verification
+
+    def add_event(self, run_id: str, type_: str, payload: Optional[dict[str, Any]] = None) -> None:
+        with self._tx():
+            self._emit(run_id, None, type_, payload)
+
+    def record_outcome(self, run_id: str, outcome: FindingOutcome) -> bool:
+        """Persist one verification result, its decisions and events atomically. False if already decided."""
+        f = outcome.finding
+        with self._tx() as c:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO finding_outcomes "
+                "(run_id, finding_id, kind, reason_code, reason, revisions, finding_json, original_json, outcome_json) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (run_id, f.finding_id, outcome.kind.value, outcome.reason_code, redact(outcome.reason), outcome.revisions,
+                 f.model_dump_json(), outcome.original.model_dump_json() if outcome.original else None,
+                 outcome.model_dump_json()),
+            )
+            if cur.rowcount != 1:
+                return False
+            for d in outcome.decisions:
+                c.execute(
+                    "INSERT INTO checker_decisions (run_id, finding_id, attempt, verdict, reasoning, counterexample, decided_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (run_id, f.finding_id, d.attempt, d.verdict.value, redact(d.reasoning),
+                     redact(d.counterexample) if d.counterexample else None, d.decided_at.isoformat()),
+                )
+                self._emit(run_id, None, "checker_decision",
+                           {"finding_id": f.finding_id, "attempt": d.attempt, "verdict": d.verdict.value})
+            self._emit(run_id, None, f"finding_{outcome.kind.value}", {
+                "finding_id": f.finding_id, "reason_code": outcome.reason_code, "revisions": outcome.revisions,
+                "severity": f.severity.value, "reason": outcome.reason[:200],
+            })
+        return True
+
+    def finding_outcomes(self, run_id: str) -> list[FindingOutcome]:
+        rows = self._conn.execute("SELECT outcome_json FROM finding_outcomes WHERE run_id=? ORDER BY finding_id", (run_id,))
+        return [FindingOutcome.model_validate_json(r["outcome_json"]) for r in rows]
+
+    def checker_decisions(self, run_id: str, finding_id: Optional[str] = None) -> list[tuple[str, CheckerDecision]]:
+        sql, args = "SELECT * FROM checker_decisions WHERE run_id=?", [run_id]
+        if finding_id:
+            sql, args = sql + " AND finding_id=?", args + [finding_id]
+        return [
+            (r["finding_id"], CheckerDecision(finding_id=r["finding_id"], verdict=r["verdict"], reasoning=r["reasoning"],
+                                              counterexample=r["counterexample"], attempt=r["attempt"], decided_at=r["decided_at"]))
+            for r in self._conn.execute(sql + " ORDER BY seq", args)
+        ]
+
+    def check_incomplete(self, run_id: str) -> bool:
+        """True if any candidate was never decided, or was decided only because checking could not finish."""
+        undecided = self._conn.execute(
+            "SELECT COUNT(*) FROM candidate_findings c WHERE c.run_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM finding_outcomes o WHERE o.run_id=c.run_id AND o.finding_id=c.finding_id)", (run_id,),
+        ).fetchone()[0]
+        codes = sorted(INCOMPLETE_CODES)
+        marks = ",".join("?" for _ in codes)
+        cut_short = self._conn.execute(
+            f"SELECT COUNT(*) FROM finding_outcomes WHERE run_id=? AND reason_code IN ({marks})", (run_id, *codes)
+        ).fetchone()[0]
+        return bool(undecided or cut_short)
 
     # ------------------------------------------------------------- read side
 

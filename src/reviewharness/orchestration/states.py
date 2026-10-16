@@ -37,12 +37,12 @@ def run_sources(new: RunStatus) -> frozenset[RunStatus]:
     return frozenset(s for s, nxt in RUN_TRANSITIONS.items() if new in nxt)
 
 
-def derive_run_status(task_statuses: list[TaskStatus], *, cancelled: bool = False) -> RunStatus:
-    """Accurate run status from task outcomes. Never COMPLETED unless every task succeeded."""
+def derive_run_status(task_statuses: list[TaskStatus], *, cancelled: bool = False, check_incomplete: bool = False) -> RunStatus:
+    """Accurate run status. Never COMPLETED unless every task succeeded and every finding was checked."""
     if cancelled:
         return R.CANCELLED
     if task_statuses and all(s is T.SUCCEEDED for s in task_statuses):
-        return R.COMPLETED
+        return R.PARTIAL if check_incomplete else R.COMPLETED
     if any(s is T.SUCCEEDED for s in task_statuses):
         return R.PARTIAL
     return R.FAILED

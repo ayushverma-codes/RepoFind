@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from reviewharness.checking.models import OutcomeKind
 from reviewharness.models import TaskStatus
 from reviewharness.orchestration.models import RunEvent
 from reviewharness.orchestration.store import RunStore
@@ -38,7 +39,7 @@ def format_run_report(store: RunStore, run_id: str, *, reused: bool = False, eve
     if reused:
         head += " (identical run already existed; nothing was re-executed)"
     lines = [head, f"  snapshot: {meta.get('snapshot_id')}  source: {run.repository.location}"]
-    lines.append("Tasks (Phase 4: findings below are unchecked candidates):")
+    lines.append("Tasks:")
     for t in run.tasks:
         r = results.get(t.task_id)
         extra = ""
@@ -51,6 +52,29 @@ def format_run_report(store: RunStore, run_id: str, *, reused: bool = False, eve
     lines.append("Coverage (file/task pairs): " + (", ".join(f"{k}={v}" for k, v in sorted(cov.items())) or "none"))
     cand = store.candidate_findings(run_id)
     lines.append(f"Candidate findings (deduplicated by id): {len(cand)}")
+    outcomes = store.finding_outcomes(run_id)
+    if cand:
+        kinds = Counter(o.kind.value for o in outcomes)
+        unchecked = len(cand) - len(outcomes)
+        lines.append(
+            "Verification: " + ", ".join(f"{k.value}={kinds.get(k.value, 0)}" for k in OutcomeKind) + f", unchecked={unchecked}"
+        )
+        sections = (
+            ("Accepted findings", OutcomeKind.ACCEPTED, False),
+            ("Unresolved (uncertain) findings", OutcomeKind.UNCERTAIN, True),
+            ("Not reported (rejected / invalid / duplicate)", None, True),
+        )
+        for title, kind, show_reason in sections:
+            picked = [o for o in outcomes if (o.kind is kind if kind else o.kind in (OutcomeKind.REJECTED, OutcomeKind.INVALID, OutcomeKind.DUPLICATE))]
+            if not picked:
+                continue
+            lines.append(f"{title}:")
+            for o in sorted(picked, key=lambda o: (o.finding.severity.rank, o.finding.finding_id))[:30]:
+                f = o.finding
+                tail = f" [{o.kind.value}: {o.reason_code}] {o.reason}" if show_reason else f" conf={f.confidence} revisions={o.revisions}"
+                lines.append(f"  [{f.severity.value}] {f.finding_id} {f.title} ({f.file_path}:{f.start_line}-{f.end_line}){tail}")
+        if unchecked:
+            lines.append(f"WARNING: {unchecked} candidate finding(s) were never checked and are NOT in the report.")
     not_ok = [t for t in run.tasks if t.status is not TaskStatus.SUCCEEDED]
     if not_ok:
         lines.append(f"INCOMPLETE: {len(not_ok)} task(s) did not succeed; their files are NOT covered.")

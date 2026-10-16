@@ -1,11 +1,12 @@
 """Run orchestration.
 
-Run-level workflow (LangGraph):   plan -> (run already exists? END) -> execute -> finalize -> END
+Run-level workflow (LangGraph):   plan -> (run already exists? END) -> execute -> check -> finalize -> END
 
 * plan      deterministic planner builds bounded tasks; the store records them (idempotent per run id)
 * execute   asyncio workers, one per task, bounded by a semaphore. Each worker claims its task in
             SQLite (so a task runs once), runs the blocking specialist in a thread, and records the
             result. A timeout, error or cancellation affects only that task.
+* check     validates and independently checks candidate findings (see reviewharness.checking)
 * finalize  sweeps leftovers and derives the run status from task outcomes.
 
 Retries: transient LLM errors are retried inside the specialist graph (settings.max_retries). The
@@ -24,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
+from reviewharness.checking.adjudicate import adjudicate
+from reviewharness.checking.pipeline import check_run
 from reviewharness.config import ConfigError, Settings
 from reviewharness.ingest.models import IngestResult
 from reviewharness.llm.base import LLMProvider
@@ -66,6 +69,7 @@ class _State(TypedDict, total=False):
     plans: list[PlannedTask]
     reused: bool
     status: str
+    deadline: float
 
 
 ReviewFn = Callable[..., SpecialistResult]
@@ -78,11 +82,13 @@ class Orchestrator:
         settings: Settings,
         provider: LLMProvider,
         review_fn: ReviewFn = run_specialist,
+        adjudicate_fn: Callable = adjudicate,
     ) -> None:
         self.store = store
         self.settings = settings
         self.provider = provider
         self.review_fn = review_fn
+        self.adjudicate_fn = adjudicate_fn
 
     # ------------------------------------------------------------------ API
 
@@ -140,6 +146,14 @@ class Orchestrator:
             for t, out in zip(todo, outcomes):
                 if isinstance(out, BaseException):
                     log.error("worker for %s crashed: %s", t.task_id, redact(f"{type(out).__name__}: {out}"))
+            return {"deadline": ctx.deadline}
+
+        async def check(state: _State) -> _State:
+            await check_run(
+                self.store, self.settings, self.provider, Path(ingest.snapshot.tree_path), ingest.inventory,
+                state["run_id"], state["deadline"],
+                adjudicate_fn=self.adjudicate_fn,
+            )
             return {}
 
         async def finalize(state: _State) -> _State:
@@ -150,10 +164,12 @@ class Orchestrator:
         graph = StateGraph(_State)
         graph.add_node("plan", plan)
         graph.add_node("execute", execute)
+        graph.add_node("check", check)
         graph.add_node("finalize", finalize)
         graph.add_edge(START, "plan")
         graph.add_conditional_edges("plan", lambda s: "end" if s.get("reused") else "execute", {"end": END, "execute": "execute"})
-        graph.add_edge("execute", "finalize")
+        graph.add_edge("execute", "check")
+        graph.add_edge("check", "finalize")
         graph.add_edge("finalize", END)
         return graph.compile()
 
@@ -204,7 +220,9 @@ class Orchestrator:
         self.store.sweep_unfinished(run_id, reason, cancelled=cancelled)
         run = self.store.get_run(run_id)
         assert run is not None
-        status = derive_run_status([t.status for t in run.tasks], cancelled=cancelled)
+        status = derive_run_status(
+            [t.status for t in run.tasks], cancelled=cancelled, check_incomplete=self.store.check_incomplete(run_id)
+        )
         counts: dict[str, int] = {}
         for t in run.tasks:
             counts[t.status.value] = counts.get(t.status.value, 0) + 1

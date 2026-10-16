@@ -23,7 +23,7 @@ from typing import Sequence, Union
 from reviewharness.llm.base import LLMResult
 
 _SPECIALIST = re.compile(r"^SPECIALIST: (\w+)$", re.MULTILINE)
-_BLOCK = re.compile(r"^##### FILE (?P<path>.+?) \(lines 1-\d+ of \d+\) #####\n(?P<body>.*?)\n##### END FILE #####$", re.MULTILINE | re.DOTALL)
+_BLOCK = re.compile(r"^##### FILE (?P<path>.+?) \(lines \d+-\d+ of \d+\) #####\n(?P<body>.*?)\n##### END FILE #####$", re.MULTILINE | re.DOTALL)
 _NUMBERED = re.compile(r"^\s*(\d+)\| ?(.*)$")
 
 # (specialist, category, severity, title, pattern, rationale, impact, confidence)
@@ -140,6 +140,11 @@ class RuleBasedProvider:
     model = "rule-based-v1"
 
     def complete(self, system: str, user: str) -> LLMResult:
+        if user.startswith("ROLE: checker"):
+            return self._check(user)
+        if user.startswith("ROLE: reviser"):
+            text = json.dumps({"finding": None})
+            return LLMResult(text=text, prompt_tokens=len(user) // 4, completion_tokens=len(text) // 4)
         specialist, files = _parse_prompt(user)
         findings: list[dict] = []
         for path, lines in sorted(files.items()):
@@ -152,6 +157,32 @@ class RuleBasedProvider:
         findings += _structural_findings(specialist, files)
         text = json.dumps({"findings": findings})
         return LLMResult(text=text, prompt_tokens=(len(system) + len(user)) // 4, completion_tokens=len(text) // 4)
+
+
+    def _check(self, user: str) -> LLMResult:
+        """Re-apply the matching rule to the cited lines of an independently rendered window."""
+        title = re.search(r"^- title: (.*)$", user, re.MULTILINE)
+        cited = re.search(r"^- lines: (\d+)-(\d+)$", user, re.MULTILINE)
+        path = re.search(r"^- file: (.*)$", user, re.MULTILINE)
+        _, files = _parse_prompt(user)
+        lines = files.get(path.group(1), {}) if path else {}
+        start, end = (int(cited.group(1)), int(cited.group(2))) if cited else (0, 0)
+        text_lines = [lines[n] for n in range(start, end + 1) if n in lines]
+        rule = next((r for r in _RULES if title and r[3] == title.group(1)), None)
+        if rule is None:  # structural findings (missing tests etc.) cannot be re-derived from one window
+            reply = {"verdict": "accept", "reasoning": "The cited lines exist and are consistent with the claim.", "counterexample": None, "suggested_severity": None}
+        else:
+            hits = [t for t in text_lines if rule[4].search(t)]
+            if not hits:
+                reply = {"verdict": "reject", "reasoning": "No cited line matches the described pattern.",
+                         "counterexample": f"None of lines {start}-{end} contains the pattern for '{rule[3]}'.", "suggested_severity": None}
+            elif all(t.lstrip().startswith("#") for t in hits) and rule[3] != "TODO/FIXME marker left in code":
+                reply = {"verdict": "reject", "reasoning": "The match is inside a comment, not executable code.",
+                         "counterexample": "The only matching text is a comment.", "suggested_severity": None}
+            else:
+                reply = {"verdict": "accept", "reasoning": "The cited lines contain the described pattern.", "counterexample": None, "suggested_severity": None}
+        out = json.dumps(reply)
+        return LLMResult(text=out, prompt_tokens=len(user) // 4, completion_tokens=len(out) // 4)
 
 
 ScriptItem = Union[str, LLMResult, Exception]
@@ -200,6 +231,8 @@ class FaultInjectingProvider:
 
         match = _SPECIALIST.search(user)
         specialist = match.group(1) if match else ""
+        if user.startswith("ROLE: checker"):
+            specialist = "checker"
         if self._delay_s:
             time.sleep(self._delay_s)
         if specialist in self._fail:

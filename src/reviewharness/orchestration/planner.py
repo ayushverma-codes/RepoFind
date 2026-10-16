@@ -18,9 +18,12 @@ SPECIALISTS = (
 )
 
 
+PIPELINE_VERSION = "p5"  # bump when a change makes older stored runs incomplete (they must not be reused)
+
+
 def make_run_id(snapshot_id: str, specialists: list[SpecialistSource], provider_name: str, model: str, nonce: str = "") -> str:
     """Same snapshot + plan + provider -> same run id, so a repeated request is detected, not duplicated."""
-    raw = "|".join([snapshot_id, ",".join(sorted(s.value for s in specialists)), provider_name, model, nonce])
+    raw = "|".join([PIPELINE_VERSION, snapshot_id, ",".join(sorted(s.value for s in specialists)), provider_name, model, nonce])
     return "R-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 

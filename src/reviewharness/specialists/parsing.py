@@ -42,8 +42,8 @@ class ResponseFormatError(ValueError):
     """The reply is not the JSON object we asked for."""
 
 
-def extract_findings_list(text: str) -> list[Any]:
-    """Return the raw `findings` list from a model reply, or raise ResponseFormatError."""
+def extract_json_object(text: str) -> dict:
+    """Parse the JSON object in a model reply (plain, fenced, or surrounded by prose)."""
     candidate = text.strip()
     fenced = _FENCE.search(candidate)
     if fenced:
@@ -60,7 +60,15 @@ def extract_findings_list(text: str) -> list[Any]:
                 data = None
     if data is None:
         raise ResponseFormatError("the reply was not valid JSON")
-    if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
+    if not isinstance(data, dict):
+        raise ResponseFormatError("the reply must be a JSON object")
+    return data
+
+
+def extract_findings_list(text: str) -> list[Any]:
+    """Return the raw `findings` list from a model reply, or raise ResponseFormatError."""
+    data = extract_json_object(text)
+    if not isinstance(data.get("findings"), list):
         raise ResponseFormatError('the JSON must be an object with a "findings" array')
     return data["findings"]
 
@@ -99,6 +107,10 @@ def check_grounding(finding: Finding, excerpts: dict[str, Excerpt]) -> str | Non
     if needle not in _normalize(" ".join(window)):
         return "evidence not found in the cited lines"
     return None
+
+
+normalize_text = _normalize
+strip_numbering = _strip_numbering
 
 
 def _first_error(exc: ValidationError) -> str:

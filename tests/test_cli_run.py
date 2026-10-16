@@ -61,3 +61,16 @@ def test_inspect_lists_and_replays_events(capsys, sample_repo):
 def test_inspect_without_database(capsys):
     assert main(["inspect"]) == 1
     assert "no run database" in capsys.readouterr().err
+
+
+def test_run_prints_verification_summary(capsys, sample_repo):
+    assert main(["run", str(sample_repo), "--test-mode"]) == 0
+    out = capsys.readouterr().out
+    assert "Verification: accepted=7" in out and "unchecked=0" in out and "Accepted findings:" in out
+
+
+def test_checker_outage_is_disclosed_and_nothing_is_accepted(capsys, sample_repo):
+    assert main(["run", str(sample_repo), "--test-mode", "--simulate-fail", "checker"]) == 1
+    out = capsys.readouterr().out
+    assert ": PARTIAL" in out and "accepted=0" in out and "uncertain=7" in out
+    assert "Accepted findings:" not in out and "checker_error" in out

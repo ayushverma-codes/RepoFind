@@ -221,7 +221,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0 if all(r.status is TaskStatus.SUCCEEDED for r in results) else 1
 
 
-_SIM_CHOICES = ["bug", "security", "testing_maintainability"]
+_SIM_CHOICES = ["bug", "security", "testing_maintainability", "checker"]
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -312,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--json", action="store_true", help="print results as JSON")
     rv.set_defaults(func=_cmd_review)
 
-    rn = sub.add_parser("run", help="run all three specialists in parallel and record the run in SQLite")
+    rn = sub.add_parser("run", help="run the specialists in parallel, verify their findings, and record the run in SQLite")
     rn.add_argument("source", help="GitHub URL, .zip file or local folder")
     rn.add_argument("--type", choices=sorted(_INGEST_TYPES), default="auto", help="input type (default: auto-detect)")
     rn.add_argument("--test-mode", action="store_true", help="use the deterministic fake provider (no API key)")
