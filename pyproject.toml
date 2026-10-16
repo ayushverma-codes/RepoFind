@@ -10,10 +10,13 @@ requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.6,<3",
     "python-dotenv>=1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Optional deterministic static-analysis tools (Phase 2). Missing tools are recorded, not fatal.
+analysis = ["ruff>=0.5", "bandit>=1.7"]
 # Needed from Phase 3/4 onward (Groq LLM adapter and LangGraph orchestration).
 agents = ["langgraph>=0.2", "groq>=0.11"]
 

@@ -1,0 +1,4 @@
+requests>=2.0
+flask==2.0.1  # web
+# comment
+-r other.txt

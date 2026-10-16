@@ -26,6 +26,10 @@ _ENV_MAP = {
     "REVIEW_MAX_RETRIES": "max_retries",
     "REVIEW_MAX_REVISIONS": "max_revisions",
     "REVIEW_MAX_REPO_MB": "max_repo_mb",
+    "REVIEW_MAX_FILES": "max_files",
+    "REVIEW_MAX_FILE_KB": "max_file_kb",
+    "REVIEW_TOOL_TIMEOUT_S": "tool_timeout_s",
+    "REVIEW_GIT_TIMEOUT_S": "git_timeout_s",
     "REVIEW_RUN_TIMEOUT_S": "run_timeout_s",
     "REVIEW_DATA_DIR": "data_dir",
     "REVIEW_LOG_LEVEL": "log_level",
@@ -45,6 +49,10 @@ class Settings(BaseModel):
     max_retries: int = Field(default=2, ge=0, le=5)
     max_revisions: int = Field(default=2, ge=0, le=5)
     max_repo_mb: int = Field(default=50, ge=1, le=1024)
+    max_files: int = Field(default=10000, ge=1, le=200000)
+    max_file_kb: int = Field(default=512, ge=1, le=10240)
+    tool_timeout_s: float = Field(default=60.0, gt=0, le=600)
+    git_timeout_s: float = Field(default=120.0, gt=0, le=1800)
     run_timeout_s: float = Field(default=900.0, ge=10, le=7200)
 
     data_dir: Path = Path(".reviewharness")

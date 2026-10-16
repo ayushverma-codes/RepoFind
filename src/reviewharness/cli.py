@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from reviewharness import __version__
 from reviewharness.config import Settings
+from reviewharness.ingest import IngestError, IngestResult, ingest_repository
+from reviewharness.ingest.snapshot import snapshot_dir
 from reviewharness.logging_setup import setup_logging
 from reviewharness.models import (
     CheckerStatus,
@@ -96,6 +98,58 @@ def _cmd_smoke(_: argparse.Namespace) -> int:
     return 0
 
 
+_INGEST_TYPES = {
+    "auto": None,
+    "github": InputType.GITHUB_URL,
+    "zip": InputType.ZIP_FILE,
+    "folder": InputType.LOCAL_FOLDER,
+}
+
+
+def format_ingest_summary(result: IngestResult) -> str:
+    snap, inv, ctx = result.snapshot, result.inventory, result.context
+    skipped = ", ".join(f"{k}={v}" for k, v in inv.skipped_counts.items()) or "none"
+    langs = ", ".join(f"{k}={v}" for k, v in inv.languages.items()) or "none"
+    lines = [
+        f"Snapshot {snap.snapshot_id} ({'reused' if snap.reused else 'new'})",
+        f"  source:   {snap.source.input_type.value} {snap.source.location}",
+        f"  copied:   {snap.file_count} files, {snap.total_bytes} bytes; dropped at copy: {snap.skipped_total}",
+        f"Inventory: {inv.included_count} reviewable of {len(inv.entries)} files, {inv.total_lines} lines",
+        f"  excluded: {skipped}",
+        f"  languages: {langs}",
+        f"Context: source_files={ctx.source_files} test_files={ctx.test_files} "
+        f"manifests={len(ctx.manifests)} entry_points={len(ctx.entry_points)}",
+    ]
+    lines += [f"  note: {n}" for n in ctx.notes]
+    if result.tool_results:
+        lines.append("Tools:")
+        for t in result.tool_results:
+            version = f" ({t.version})" if t.version else ""
+            detail = f"{t.issue_total} issue(s)" if t.status.value == "ok" else (t.error or "")
+            lines.append(f"  {t.tool}{version}: {t.status.value} - {detail}")
+            lines += [f"    warning: {w}" for w in t.warnings[:3]]
+    else:
+        lines.append("Tools: not run (--no-tools)")
+    lines.append(f"Artifacts: {snapshot_dir(snap)}")
+    return "\n".join(lines)
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    try:
+        result = ingest_repository(
+            args.source, _INGEST_TYPES[args.type], settings, run_tools=not args.no_tools
+        )
+    except ValidationError as exc:
+        print("Invalid input:\n" + _format_errors(exc), file=sys.stderr)
+        return 2
+    except IngestError as exc:
+        print(f"INGEST FAILED: {exc}", file=sys.stderr)
+        return 1
+    print(result.model_dump_json(indent=2) if args.json else format_ingest_summary(result))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reviewharness", description="Multi-agent repository review harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -107,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     vf = sub.add_parser("validate-finding", help="validate a finding JSON file against the schema")
     vf.add_argument("path")
     vf.set_defaults(func=_cmd_validate_finding)
+
+    ing = sub.add_parser("ingest", help="snapshot a repository and run deterministic analysis")
+    ing.add_argument("source", help="GitHub URL, .zip file or local folder")
+    ing.add_argument("--type", choices=sorted(_INGEST_TYPES), default="auto", help="input type (default: auto-detect)")
+    ing.add_argument("--no-tools", action="store_true", help="skip static-analysis tools")
+    ing.add_argument("--json", action="store_true", help="print the full result as JSON")
+    ing.set_defaults(func=_cmd_ingest)
     return parser
 
 
