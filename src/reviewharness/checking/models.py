@@ -18,7 +18,7 @@ class OutcomeKind(str, Enum):
 
 
 # Outcomes with these codes mean "we could not finish checking", so the run cannot be called complete.
-INCOMPLETE_CODES = frozenset({"checker_error", "check_timeout", "check_budget", "run_deadline"})
+INCOMPLETE_CODES = frozenset({"checker_error", "checker_inconsistent", "check_timeout", "check_budget", "run_deadline"})
 
 
 class CheckerReply(BaseModel):

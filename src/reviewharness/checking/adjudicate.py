@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, TypedDict
@@ -120,6 +121,25 @@ def _lower_only(current: Severity, suggested: Severity | None) -> Severity:
     return suggested if suggested is not None and suggested.rank > current.rank else current
 
 
+# Conservative contradiction indicators, not a general semantic truth detector.
+# A rejected finding is never auto-accepted because of these phrases.
+_SUPPORT_CLAIM = re.compile(
+    r"\b(?:the\s+)?(?:claim|finding|issue|concern)\s+(?:is|was)\s+"
+    r"(?:clearly\s+)?(?:supported|valid|correct|substantiated)\b"
+    r"|\b(?:source|code|evidence)\s+(?:clearly\s+)?supports\s+"
+    r"(?:the\s+)?(?:claim|finding|issue|concern)\b",
+    re.IGNORECASE,
+)
+
+
+def _contradictory_rejection(reply: CheckerReply) -> bool:
+    """Flag explicit support of a rejected claim; ambiguous cases need human review."""
+    if reply.verdict is not CheckerVerdict.REJECT:
+        return False
+    explanation = " ".join(filter(None, (reply.reasoning, reply.counterexample)))
+    return bool(_SUPPORT_CLAIM.search(explanation))
+
+
 def accepted_confidence(confidence: float, revisions: int) -> float:
     return round(min(confidence, MAX_ACCEPTED_CONFIDENCE) * REVISION_CONFIDENCE_FACTOR**revisions, 2)
 
@@ -185,6 +205,9 @@ def adjudicate(
             lowered = _lower_only(f.severity, reply.suggested_severity)
             return {**update, "finding": f.model_copy(update={"severity": lowered}), "route": "end", "kind": "accepted", "code": "checker_accepted", "reason": reply.reasoning[:500]}
         if reply.verdict is CheckerVerdict.REJECT:
+            if _contradictory_rejection(reply):
+                return {**update, "route": "end", "kind": "uncertain", "code": "checker_inconsistent",
+                        "reason": "checker rejected the finding but its explanation explicitly supports it; manual review required"}
             why = reply.counterexample or reply.reasoning
             return {**update, "route": "end", "kind": "rejected", "code": "checker_rejected", "reason": why[:500]}
         if revisions >= settings.max_revisions:

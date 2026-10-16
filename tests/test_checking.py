@@ -172,6 +172,22 @@ def test_false_positive_is_rejected_with_counterexample(root, settings):
     assert "comment" in out.reason and out.decisions[0].counterexample
 
 
+def test_rejection_with_explicitly_supportive_reason_is_uncertain(root, settings):
+    response = {"verdict": "reject", "reasoning": "The claim is supported by the source.",
+                "counterexample": None, "suggested_severity": None}
+    out = adjudicate(mk(), root, Routed({"Mutable default argument": [response]}), settings)
+    assert out.kind is OutcomeKind.UNCERTAIN
+    assert out.reason_code == "checker_inconsistent"
+    assert out.finding.checker_status is CheckerStatus.UNCERTAIN
+    assert out.decisions[-1].verdict is CheckerVerdict.REJECT
+
+
+def test_normal_rejection_stays_rejected(root, settings):
+    out = adjudicate(mk(), root, Routed({"Mutable default argument": [rej()]}), settings)
+    assert out.kind is OutcomeKind.REJECTED
+    assert out.reason_code == "checker_rejected"
+
+
 def test_revision_then_accept_keeps_id_and_records_the_original(root, settings):
     orig = mk(start=6, end=7, evidence="def f(x=[]):\n    return x", severity="high")
     p = Routed({"Mutable default argument": [rev(), acc()]}, {"Mutable default argument": [revision_item(severity="medium")]})
