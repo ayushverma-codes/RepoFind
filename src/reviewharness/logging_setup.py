@@ -9,13 +9,15 @@ LOGGER_NAME = "reviewharness"
 
 _PATTERNS = [
     re.compile(r"gsk_[A-Za-z0-9]{10,}"),  # Groq API keys
+    re.compile(r"org_[A-Za-z0-9]{10,}"),  # Provider organization identifiers
     re.compile(r"(?i)(api[_-]?key|authorization|bearer|token|secret)(\"?\s*[:=]\s*\"?)[^\s\"',}]+"),
 ]
 
 
 def redact(text: str) -> str:
     text = _PATTERNS[0].sub("[REDACTED]", text)
-    return _PATTERNS[1].sub(r"\1\2[REDACTED]", text)
+    text = _PATTERNS[1].sub("[REDACTED_ORG]", text)
+    return _PATTERNS[2].sub(r"\1\2[REDACTED]", text)
 
 
 class RedactingFilter(logging.Filter):

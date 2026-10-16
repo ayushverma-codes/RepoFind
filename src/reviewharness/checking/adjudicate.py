@@ -16,6 +16,7 @@ Every provider call is retried at most settings.max_retries times; revisions at 
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any, Callable, TypedDict
@@ -38,7 +39,7 @@ from reviewharness.specialists.prompts import repair_note
 log = logging.getLogger("reviewharness.checking")
 
 BACKOFF_BASE_S = 0.5
-BACKOFF_CAP_S = 8.0
+BACKOFF_CAP_S = 30.0
 MAX_ACCEPTED_CONFIDENCE = 0.95
 MAX_UNCERTAIN_CONFIDENCE = 0.5
 REVISION_CONFIDENCE_FACTOR = 0.9
@@ -75,16 +76,26 @@ def call_model(provider: LLMProvider, system: str, user: str, parse: Callable[[s
     max_attempts = settings.max_retries + 1
     feedback, kind, message = "", "response", ""
     ptok = ctok = 0
+    started = time.monotonic()
+    retry_after_s = None
     for attempt in range(1, max_attempts + 1):
         if attempt > 1 and kind in ("timeout", "transient"):
-            sleep(min(BACKOFF_BASE_S * 2 ** (attempt - 2), BACKOFF_CAP_S))
+            delay = min(BACKOFF_BASE_S * 2 ** (attempt - 2), BACKOFF_CAP_S)
+            if retry_after_s is not None and math.isfinite(retry_after_s) and retry_after_s >= 0:
+                delay = retry_after_s
+            remaining = settings.task_timeout_s - (time.monotonic() - started)
+            if delay > BACKOFF_CAP_S or delay >= remaining:
+                raise CallFailed("transient", "provider retry delay exceeds safe wait or task budget")
+            sleep(delay)
         try:
             result = provider.complete(system, user + (repair_note(feedback) if feedback else ""))
         except LLMTimeoutError as exc:
             kind, message, feedback = "timeout", str(exc), ""
+            retry_after_s = exc.retry_after_s
             continue
         except LLMTransientError as exc:
             kind, message, feedback = "transient", str(exc), ""
+            retry_after_s = exc.retry_after_s
             continue
         except LLMResponseError as exc:
             kind, message, feedback = "response", str(exc), str(exc)

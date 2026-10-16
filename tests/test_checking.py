@@ -376,3 +376,41 @@ def test_checker_decisions_are_append_only(store, settings, ingest):
     with pytest.raises(sqlite3.DatabaseError):
         store._conn.execute("DELETE FROM checker_decisions")
     assert len(store.checker_decisions(out.run_id)) == 1
+
+
+def test_checker_retry_respects_server_delay():
+    from reviewharness.checking.adjudicate import call_model
+    from reviewharness.llm.base import LLMResult, LLMTransientError
+    from reviewharness.config import Settings
+
+    class Provider:
+        attempts = 0
+        def complete(self, system, user):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise LLMTransientError("rate limited", retry_after_s=9.0)
+            return LLMResult(text="ok")
+
+    pauses = []
+    provider = Provider()
+    output, _, _ = call_model(provider, "s", "u", lambda value: value, Settings(), pauses.append)
+    assert output == "ok"
+    assert pauses == [9.0]
+    assert provider.attempts == 2
+
+
+def test_checker_retry_rejects_excessive_server_delay():
+    from reviewharness.checking.adjudicate import call_model, CallFailed
+    from reviewharness.llm.base import LLMTransientError
+    from reviewharness.config import Settings
+
+    class Provider:
+        attempts = 0
+        def complete(self, system, user):
+            self.attempts += 1
+            raise LLMTransientError("rate limited", retry_after_s=40.0)
+
+    provider = Provider()
+    with pytest.raises(CallFailed, match="safe wait"):
+        call_model(provider, "s", "u", str, Settings(), lambda _: pytest.fail("must not sleep"))
+    assert provider.attempts == 1

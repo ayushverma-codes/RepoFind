@@ -209,7 +209,7 @@ def test_provider_retry_delay_overrides_backoff(env):
 
 
 def test_provider_delay_over_safe_limit_fails_without_second_call(env):
-    p = ScriptedProvider([LLMTransientError("429", retry_after_s=30), EMPTY])
+    p = ScriptedProvider([LLMTransientError("429", retry_after_s=31), EMPTY])
     r = run(env, SpecialistSource.SECURITY, p)
     assert r.status is TaskStatus.FAILED
     assert r.attempts == 1 and len(p.calls) == 1

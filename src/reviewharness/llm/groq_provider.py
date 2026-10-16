@@ -10,6 +10,7 @@ from typing import Any, Optional
 from email.utils import parsedate_to_datetime
 import math
 import time
+import threading
 
 from reviewharness.config import ConfigError, Settings
 from reviewharness.llm.base import (
@@ -24,6 +25,39 @@ from reviewharness.logging_setup import redact
 
 # gpt-oss models spend completion tokens on reasoning before the JSON answer.
 MAX_COMPLETION_TOKENS = 4096
+# Bound queue waiting independently of the API timeout. This is not a quota bypass.
+MAX_SHARED_WAIT_S = 30.0
+
+
+class _RateGate:
+    """One provider instance serializes requests and shares HTTP 429 cooldown."""
+
+    def __init__(self, *, clock=time.monotonic, sleep=time.sleep):
+        self._lock = threading.Lock()
+        self._clock = clock
+        self._sleep = sleep
+        self._ready_at = 0.0
+
+    def run(self, call):
+        with self._lock:
+            remaining = self._ready_at - self._clock()
+            if remaining > MAX_SHARED_WAIT_S:
+                raise LLMTransientError(
+                    "shared provider cooldown exceeds safe wait bound",
+                    retry_after_s=remaining,
+                )
+            if remaining > 0:
+                self._sleep(remaining)
+            try:
+                return call()
+            except Exception as exc:
+                status = getattr(exc, "status_code", None)
+                if status == 429:
+                    delay = _retry_delay(exc)
+                    if delay is not None:
+                        self._ready_at = max(self._ready_at, self._clock() + delay)
+                raise
+
 
 
 def _retry_delay(exc: Exception) -> float | None:
@@ -84,6 +118,8 @@ def translate_error(exc: Exception) -> LLMError:
     Matching on class name and `status_code` keeps this testable without groq
     installed. Messages are redacted and truncated before they can be logged.
     """
+    if isinstance(exc, LLMError):
+        return exc
     name = type(exc).__name__
     status = getattr(exc, "status_code", None)
     msg = redact(str(exc))[:200]
@@ -118,10 +154,11 @@ class GroqProvider:
                 max_retries=0,
             )
         self._client = client
+        self._gate = _RateGate()
 
     def complete(self, system: str, user: str) -> LLMResult:
         try:
-            resp = self._client.chat.completions.create(
+            resp = self._gate.run(lambda: self._client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system},
@@ -131,7 +168,7 @@ class GroqProvider:
                 max_completion_tokens=MAX_COMPLETION_TOKENS,
                 response_format={"type": "json_object"},
                 extra_body={"reasoning_effort": "low"},
-            )
+            ))
         except Exception as exc:  # noqa: BLE001 - translated, never swallowed
             raise translate_error(exc) from None
 

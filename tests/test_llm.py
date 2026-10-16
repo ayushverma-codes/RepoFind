@@ -172,3 +172,39 @@ def test_header_errors_redact_secrets():
 
 def test_existing_transient_constructor_compatible():
     assert LLMTransientError("temporary").retry_after_s is None
+
+
+def test_shared_gate_respects_rate_limit_across_calls():
+    from reviewharness.llm.groq_provider import _RateGate
+    clock = [100.0]
+    waits = []
+
+    def advance(delay):
+        waits.append(delay)
+        clock[0] += delay
+
+    gate = _RateGate(clock=lambda: clock[0], sleep=advance)
+    error = StatusError(429)
+    error.response = SimpleNamespace(headers={"retry-after": "9"})
+    with pytest.raises(StatusError):
+        gate.run(lambda: (_ for _ in ()).throw(error))
+    assert gate.run(lambda: "ok") == "ok"
+    assert waits == [9.0]
+
+
+def test_shared_gate_rejects_unbounded_cooldown_without_sleeping():
+    from reviewharness.llm.groq_provider import _RateGate
+    gate = _RateGate(clock=lambda: 100.0, sleep=lambda duration: pytest.fail("must not sleep"))
+    error = StatusError(429)
+    error.response = SimpleNamespace(headers={"retry-after": "60"})
+    with pytest.raises(StatusError):
+        gate.run(lambda: (_ for _ in ()).throw(error))
+    with pytest.raises(LLMTransientError, match="safe wait bound") as caught:
+        gate.run(lambda: pytest.fail("must not call"))
+    assert caught.value.retry_after_s == 60
+
+
+def test_rate_limit_message_redacts_organization():
+    from reviewharness.logging_setup import redact
+    secret = "org_01kzv9g03eeh58ax4mtwace59w"
+    assert secret not in redact("rate limited: " + secret)

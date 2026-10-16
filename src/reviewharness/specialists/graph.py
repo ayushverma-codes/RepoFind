@@ -37,7 +37,7 @@ from reviewharness.specialists.prompts import repair_note, system_prompt, user_p
 log = logging.getLogger("reviewharness.specialists")
 
 BACKOFF_BASE_S = 0.5
-BACKOFF_CAP_S = 8.0
+BACKOFF_CAP_S = 30.0
 
 
 class ReviewState(TypedDict, total=False):
