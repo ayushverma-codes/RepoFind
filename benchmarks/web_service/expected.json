@@ -1,0 +1,14 @@
+{
+  "name": "web_service",
+  "description": "Small service module with five planted security issues and one comment that mentions eval() (a deliberate false-positive trap).",
+  "expected": [
+    {"id": "WS-CRED", "file": "app.py", "start_line": 4, "end_line": 4, "category": "security", "note": "hardcoded credential"},
+    {"id": "WS-SHELL", "file": "app.py", "start_line": 8, "end_line": 8, "category": "security", "note": "subprocess with shell=True"},
+    {"id": "WS-EVAL", "file": "app.py", "start_line": 17, "end_line": 17, "category": "security", "note": "eval on caller input"},
+    {"id": "WS-MD5", "file": "app.py", "start_line": 21, "end_line": 21, "category": "security", "note": "MD5 used as a checksum"},
+    {"id": "WS-TLS", "file": "app.py", "start_line": 25, "end_line": 25, "category": "security", "note": "TLS verification disabled"}
+  ],
+  "traps": [
+    "app.py line 12 is a comment that mentions eval(); a reviewer that flags it reports a false positive the checker should reject."
+  ]
+}

@@ -13,6 +13,14 @@ from pydantic import ValidationError
 
 from reviewharness import __version__
 from reviewharness.config import ConfigError, Settings
+from reviewharness.evaluation import (
+    DEFAULT_BENCHMARKS_DIR,
+    EvaluationError,
+    run_benchmarks,
+    run_failure_demo,
+    write_benchmark_report,
+)
+from reviewharness.evaluation.benchmark import render_benchmark_text
 from reviewharness.ingest import IngestError, IngestResult, ingest_repository
 from reviewharness.ingest.pipeline import write_json_atomic
 from reviewharness.ingest.snapshot import snapshot_dir
@@ -327,6 +335,54 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
         store.close()
 
 
+def _cmd_benchmark(args: argparse.Namespace) -> int:
+    """Phase 7: baseline vs multi-agent on the benchmark repositories, scored against ground truth."""
+    settings = Settings.from_env()
+    if not args.live:
+        settings = settings.model_copy(update={"test_mode": True})
+    out_dir = Path(args.out) if args.out else settings.data_dir / "benchmarks"
+    try:
+        provider = make_provider(settings)
+        report = run_benchmarks(Path(args.benchmarks_dir), out_dir, settings, provider, only=args.only or None)
+        js, md = write_benchmark_report(report, out_dir)
+    except ConfigError as exc:
+        print(f"CONFIG ERROR: {exc}", file=sys.stderr)
+        return 2
+    except EvaluationError as exc:
+        print(f"BENCHMARK ERROR: {exc}", file=sys.stderr)
+        return 2
+    except IngestError as exc:
+        print(f"INGEST FAILED: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"BENCHMARK OUTPUT FAILED: {exc.strerror}", file=sys.stderr)
+        return 1
+    print(report.model_dump_json(indent=2) if args.json else render_benchmark_text(report))
+    print(f"Wrote {js}\nWrote {md}", file=sys.stderr if args.json else sys.stdout)
+    return 0
+
+
+def _cmd_failure_demo(args: argparse.Namespace) -> int:
+    """Phase 7: deterministic failure scenarios; exit 0 only if the system behaved as required."""
+    settings = Settings.from_env().model_copy(update={"test_mode": True})
+    out_dir = Path(args.out) if args.out else settings.data_dir / "failure_demo"
+    try:
+        results = run_failure_demo(Path(args.benchmarks_dir), out_dir, settings)
+    except EvaluationError as exc:
+        print(f"BENCHMARK ERROR: {exc}", file=sys.stderr)
+        return 2
+    except IngestError as exc:
+        print(f"INGEST FAILED: {exc}", file=sys.stderr)
+        return 1
+    for r in results:
+        print(f"Scenario {r.scenario}: run {r.run_id} ended '{r.run_status}'")
+        for c in r.checks:
+            print(f"  [{'PASS' if c.passed else 'FAIL'}] {c.name} ({c.detail})")
+    ok = all(r.passed for r in results)
+    print("FAILURE DEMO: " + ("PASSED" if ok else "FAILED"))
+    return 0 if ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reviewharness", description="Multi-agent repository review harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -376,6 +432,19 @@ def build_parser() -> argparse.ArgumentParser:
     ins.add_argument("run_id", nargs="?")
     ins.add_argument("--events", action="store_true", help="include the full event history")
     ins.set_defaults(func=_cmd_inspect)
+
+    bm = sub.add_parser("benchmark", help="compare the single-agent baseline with the multi-agent system on the benchmark repositories")
+    bm.add_argument("--live", action="store_true", help="use the configured Groq model instead of the deterministic test provider")
+    bm.add_argument("--only", action="append", default=[], metavar="NAME", help="run only this benchmark; repeatable")
+    bm.add_argument("--benchmarks-dir", default=str(DEFAULT_BENCHMARKS_DIR), help="directory holding <name>/repo and <name>/expected.json")
+    bm.add_argument("--out", metavar="DIR", help="where to write benchmark_results.json/.md and run artifacts (default: <data dir>/benchmarks)")
+    bm.add_argument("--json", action="store_true", help="print the full result as JSON")
+    bm.set_defaults(func=_cmd_benchmark)
+
+    fd = sub.add_parser("failure-demo", help="demonstrate partial-failure handling (worker failure, checker outage) in test mode")
+    fd.add_argument("--benchmarks-dir", default=str(DEFAULT_BENCHMARKS_DIR))
+    fd.add_argument("--out", metavar="DIR", help="where to write run artifacts (default: <data dir>/failure_demo)")
+    fd.set_defaults(func=_cmd_failure_demo)
     return parser
 
 

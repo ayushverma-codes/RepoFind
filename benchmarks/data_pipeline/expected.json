@@ -1,0 +1,14 @@
+{
+  "name": "data_pipeline",
+  "description": "Four planted logic bugs. One (off-by-one) is outside what the deterministic test provider can detect; one string literal contains 'x == None' (a false-positive trap the checker cannot reject).",
+  "expected": [
+    {"id": "DP-MUTABLE", "file": "pipeline.py", "start_line": 1, "end_line": 1, "category": "bug", "note": "mutable default argument"},
+    {"id": "DP-BARE", "file": "pipeline.py", "start_line": 9, "end_line": 9, "category": "bug", "note": "bare except hides errors"},
+    {"id": "DP-NONE", "file": "pipeline.py", "start_line": 14, "end_line": 14, "category": "bug", "note": "comparison to None with =="},
+    {"id": "DP-OFFBYONE", "file": "pipeline.py", "start_line": 19, "end_line": 19, "category": "bug", "note": "range(len(items) + 1) reads past the end"}
+  ],
+  "traps": [
+    "pipeline.py line 25 contains 'x == None' inside a string literal; a pattern-based reviewer reports it and the checker may accept it.",
+    "pipeline.py line 19 needs real reasoning about loop bounds; the deterministic test provider cannot find it (expected miss in test mode)."
+  ]
+}

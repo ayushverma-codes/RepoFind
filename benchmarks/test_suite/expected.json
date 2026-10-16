@@ -1,0 +1,12 @@
+{
+  "name": "test_suite",
+  "description": "Testing and maintainability problems: unmanaged markers, a test without assertions, a trivial assertion and an untested module.",
+  "expected": [
+    {"id": "TS-TODO", "file": "billing.py", "start_line": 1, "end_line": 1, "category": "maintainability", "note": "TODO marker"},
+    {"id": "TS-FIXME", "file": "billing.py", "start_line": 9, "end_line": 9, "category": "maintainability", "note": "FIXME marker"},
+    {"id": "TS-NOASSERT", "file": "tests/test_billing.py", "start_line": 4, "end_line": 4, "category": "testing", "note": "test never asserts"},
+    {"id": "TS-TRIVIAL", "file": "tests/test_billing.py", "start_line": 9, "end_line": 9, "category": "testing", "note": "assert True"},
+    {"id": "TS-UNTESTED", "file": "inventory.py", "start_line": 1, "end_line": 1, "category": "testing", "note": "no test module for inventory.py"}
+  ],
+  "traps": []
+}
