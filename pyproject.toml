@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewharness"
+version = "0.1.0"
+description = "Deterministic-first multi-agent repository review harness"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.6,<3",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# Needed from Phase 3/4 onward (Groq LLM adapter and LangGraph orchestration).
+agents = ["langgraph>=0.2", "groq>=0.11"]
+
+[project.scripts]
+reviewharness = "reviewharness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
