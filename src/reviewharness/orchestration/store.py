@@ -417,6 +417,17 @@ class RunStore:
         rows = self._conn.execute("SELECT finding_json FROM candidate_findings WHERE run_id=? ORDER BY finding_id", (run_id,))
         return [Finding.model_validate_json(r["finding_json"]) for r in rows]
 
+    def token_usage(self, run_id: str) -> tuple[int, int]:
+        """(prompt, completion) tokens recorded so far by specialists and checker. 0 = not reported."""
+        prompt = completion = 0
+        for r in self.task_results(run_id).values():
+            prompt += r.prompt_tokens
+            completion += r.completion_tokens
+        for o in self.finding_outcomes(run_id):
+            prompt += o.prompt_tokens
+            completion += o.completion_tokens
+        return prompt, completion
+
     def task_results(self, run_id: str) -> dict[str, SpecialistResult]:
         rows = self._conn.execute("SELECT task_id, result_json FROM tasks WHERE run_id=? AND result_json IS NOT NULL", (run_id,))
         return {r["task_id"]: SpecialistResult.model_validate_json(r["result_json"]) for r in rows}

@@ -310,3 +310,23 @@ class Report(_Strict):
         for f in self.findings:
             counts[f.severity.value] += 1
         return counts
+
+
+# --------------------------------------------------------------------------
+# Deterministic prioritization
+# --------------------------------------------------------------------------
+
+_CATEGORY_ORDER = {
+    Category.SECURITY: 0,
+    Category.BUG: 1,
+    Category.TESTING: 2,
+    Category.MAINTAINABILITY: 3,
+}
+
+
+def priority_key(f: "Finding") -> tuple:
+    """Sort key for reports: severity, then confidence, then category, then location, then id.
+
+    Pure function of the finding, so the same findings always produce the same order.
+    """
+    return (f.severity.rank, -f.confidence, _CATEGORY_ORDER[f.category], f.file_path, f.start_line, f.finding_id)

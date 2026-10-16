@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
 from reviewharness.checking.adjudicate import adjudicate
-from reviewharness.checking.pipeline import check_run
+from reviewharness.checking.pipeline import MAX_CHECKED_FINDINGS, check_run
 from reviewharness.config import ConfigError, Settings
 from reviewharness.ingest.models import IngestResult
 from reviewharness.llm.base import LLMProvider
@@ -133,6 +133,7 @@ class Orchestrator:
         async def execute(state: _State) -> _State:
             run_id = state["run_id"]
             self.store.start_run(run_id)
+            self.store.add_event(run_id, "run_budgets", self._budgets())
             ctx = RunContext(
                 run_id=run_id,
                 ingest=ingest,
@@ -181,6 +182,12 @@ class Orchestrator:
             if remaining <= 0:
                 self.store.skip_task(task.task_id, "run time budget exhausted before the task started")
                 return
+            if sum(self.store.token_usage(ctx.run_id)) >= self.settings.max_total_tokens:
+                self.store.skip_task(
+                    task.task_id,
+                    f"model-usage budget of {self.settings.max_total_tokens} tokens exhausted before the task started",
+                )
+                return
             if not self.store.claim_task(task.task_id):
                 return  # someone else owns it; never execute twice
             limit = min(self.settings.task_timeout_s, remaining)
@@ -209,6 +216,22 @@ class Orchestrator:
                     self.store.finish_task(task.task_id, TaskStatus.SUCCEEDED, result=result)
                 else:
                     self.store.finish_task(task.task_id, result.status, error=result.error or "unknown failure", result=result)
+
+    def _budgets(self) -> dict:
+        """The limits this run was started with, recorded so a replayed report states them accurately."""
+        s = self.settings
+        return {
+            "provider": self.provider.name,
+            "model": self.provider.model,
+            "max_concurrency": s.max_concurrency,
+            "max_retries": s.max_retries,
+            "max_revisions": s.max_revisions,
+            "max_total_tokens": s.max_total_tokens,
+            "max_checked_findings": MAX_CHECKED_FINDINGS,
+            "llm_timeout_s": s.llm_timeout_s,
+            "task_timeout_s": s.task_timeout_s,
+            "run_timeout_s": s.run_timeout_s,
+        }
 
     # -------------------------------------------------------------- wrap-up
 

@@ -20,7 +20,7 @@ from reviewharness.config import Settings
 from reviewharness.ingest.models import Inventory
 from reviewharness.llm.base import LLMProvider
 from reviewharness.logging_setup import redact
-from reviewharness.models import CheckerStatus, Finding, Report, TaskStatus
+from reviewharness.models import CheckerStatus, Finding, Report, TaskStatus, priority_key
 
 if TYPE_CHECKING:
     from reviewharness.orchestration.store import RunStore
@@ -71,6 +71,11 @@ async def check_run(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     outcome = _uncertain(f, "run_deadline", "run time budget exhausted before this finding was checked")
+                elif sum(store.token_usage(run_id)) >= settings.max_total_tokens:
+                    outcome = _uncertain(
+                        f, "check_budget",
+                        f"model-usage budget of {settings.max_total_tokens} tokens exhausted before this finding was checked",
+                    )
                 else:
                     limit = min(settings.task_timeout_s, remaining)
                     call = functools.partial(adjudicate_fn, f, root, provider, settings, sleep=sleep)
@@ -104,11 +109,8 @@ def assemble_report(store: "RunStore", run_id: str) -> Report:
         raise KeyError(run_id)
     outcomes = store.finding_outcomes(run_id)
 
-    def order(f: Finding):
-        return (f.severity.rank, -f.confidence, f.finding_id)
-
-    accepted = sorted((o.finding for o in outcomes if o.kind is OutcomeKind.ACCEPTED), key=order)
-    unresolved = sorted((o.finding for o in outcomes if o.kind is OutcomeKind.UNCERTAIN), key=order)
+    accepted = sorted((o.finding for o in outcomes if o.kind is OutcomeKind.ACCEPTED), key=priority_key)
+    unresolved = sorted((o.finding for o in outcomes if o.kind is OutcomeKind.UNCERTAIN), key=priority_key)
     bad = (TaskStatus.FAILED, TaskStatus.TIMED_OUT, TaskStatus.CANCELLED)
     return Report(
         run_id=run_id,

@@ -33,6 +33,7 @@ from reviewharness.models import (
 )
 from reviewharness.orchestration import OrchestrationError, Orchestrator, RunStore
 from reviewharness.orchestration.inspect import format_run_report, format_run_list
+from reviewharness.reporting import build_run_report, render_json, render_markdown, write_reports
 from reviewharness.specialists import SpecialistResult, review as run_specialist
 
 
@@ -256,13 +257,54 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print("Interrupted: unfinished tasks were marked cancelled; completed results were kept.", file=sys.stderr)
         return 130
     try:
+        report_dir = None
+        if not args.no_report:
+            try:
+                report_dir = settings.data_dir / "reports" / outcome.run_id
+                write_reports(build_run_report(store, outcome.run_id), report_dir)
+            except OSError as exc:
+                report_dir = None
+                print(f"REPORT WRITE FAILED: {exc.strerror}", file=sys.stderr)
         if args.json:
-            print(json.dumps({"run_id": outcome.run_id, "status": outcome.status.value, "reused": outcome.reused}))
+            payload = {"run_id": outcome.run_id, "status": outcome.status.value, "reused": outcome.reused}
+            if report_dir:
+                payload["report_dir"] = str(report_dir)
+            print(json.dumps(payload))
         else:
             print(format_run_report(store, outcome.run_id, reused=outcome.reused))
+            if report_dir:
+                print(f"Reports: {report_dir}")
     finally:
         store.close()
     return 0 if outcome.status.value == "completed" else 1
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Rebuild the report from recorded state only: no provider, no repository access."""
+    settings = Settings.from_env()
+    db = settings.data_dir / "runs.db"
+    if not db.exists():
+        print(f"no run database at {db}", file=sys.stderr)
+        return 1
+    store = RunStore(db)
+    try:
+        try:
+            report = build_run_report(store, args.run_id)
+        except KeyError:
+            print(f"unknown run {args.run_id}", file=sys.stderr)
+            return 1
+        if args.out:
+            try:
+                md, js = write_reports(report, Path(args.out))
+            except OSError as exc:
+                print(f"REPORT WRITE FAILED: {exc.strerror}", file=sys.stderr)
+                return 1
+            print(f"Wrote {md}\nWrote {js}")
+        else:
+            print(render_json(report) if args.format == "json" else render_markdown(report), end="")
+        return 0
+    finally:
+        store.close()
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
@@ -320,8 +362,15 @@ def build_parser() -> argparse.ArgumentParser:
     rn.add_argument("--simulate-delay", type=float, default=0.0, metavar="SECONDS", help="(test mode) add latency to every model call")
     rn.add_argument("--simulate-fail", action="append", default=[], choices=_SIM_CHOICES, metavar="SPECIALIST",
                     help="(test mode) make this specialist's provider calls fail; repeatable")
+    rn.add_argument("--no-report", action="store_true", help="do not write report.md / report.json to the data directory")
     rn.add_argument("--json", action="store_true", help="print only run id and status as JSON")
     rn.set_defaults(func=_cmd_run)
+
+    rp = sub.add_parser("report", help="regenerate the Markdown/JSON report of a recorded run (replay; no model calls)")
+    rp.add_argument("run_id")
+    rp.add_argument("--format", choices=["markdown", "json"], default="markdown", help="stdout format when --out is not given")
+    rp.add_argument("--out", metavar="DIR", help="write report.md and report.json into DIR instead of printing")
+    rp.set_defaults(func=_cmd_report)
 
     ins = sub.add_parser("inspect", help="show a recorded run (or list runs when no id is given)")
     ins.add_argument("run_id", nargs="?")

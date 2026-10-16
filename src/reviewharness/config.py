@@ -25,6 +25,7 @@ _ENV_MAP = {
     "REVIEW_MAX_CONCURRENCY": "max_concurrency",
     "REVIEW_MAX_RETRIES": "max_retries",
     "REVIEW_MAX_REVISIONS": "max_revisions",
+    "REVIEW_MAX_TOKENS": "max_total_tokens",
     "REVIEW_MAX_REPO_MB": "max_repo_mb",
     "REVIEW_MAX_FILES": "max_files",
     "REVIEW_MAX_FILE_KB": "max_file_kb",
@@ -49,6 +50,8 @@ class Settings(BaseModel):
     max_concurrency: int = Field(default=3, ge=1, le=8)
     max_retries: int = Field(default=2, ge=0, le=5)
     max_revisions: int = Field(default=2, ge=0, le=5)
+    # Model-usage budget for one run (prompt + completion tokens, specialists and checker together).
+    max_total_tokens: int = Field(default=500_000, ge=1, le=50_000_000)
     max_repo_mb: int = Field(default=50, ge=1, le=1024)
     max_files: int = Field(default=10000, ge=1, le=200000)
     max_file_kb: int = Field(default=512, ge=1, le=10240)
