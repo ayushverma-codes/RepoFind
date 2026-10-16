@@ -83,12 +83,15 @@ def review(
     *,
     sleep: Callable[[float], None] = time.sleep,
     max_total_chars: int | None = None,
+    scope_paths: list[str] | None = None,
 ) -> SpecialistResult:
     started = time.monotonic()
     max_attempts = settings.max_retries + 1
 
     kwargs = {} if max_total_chars is None else {"max_total_chars": max_total_chars}
-    excerpts, coverage = build_excerpts(root, inventory, select_scope(inventory, specialist), **kwargs)
+    excerpts, coverage = build_excerpts(
+        root, inventory, select_scope(inventory, specialist) if scope_paths is None else scope_paths, **kwargs
+    )
     system = system_prompt(specialist)
     base_user = user_prompt(specialist, context, excerpts)
 

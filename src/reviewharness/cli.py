@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -16,6 +17,7 @@ from reviewharness.ingest import IngestError, IngestResult, ingest_repository
 from reviewharness.ingest.pipeline import write_json_atomic
 from reviewharness.ingest.snapshot import snapshot_dir
 from reviewharness.llm import make_provider
+from reviewharness.llm.fake import FaultInjectingProvider
 from reviewharness.logging_setup import setup_logging
 from reviewharness.models import (
     CheckerStatus,
@@ -29,6 +31,8 @@ from reviewharness.models import (
     SpecialistSource,
     TaskStatus,
 )
+from reviewharness.orchestration import OrchestrationError, Orchestrator, RunStore
+from reviewharness.orchestration.inspect import format_run_report, format_run_list
 from reviewharness.specialists import SpecialistResult, review as run_specialist
 
 
@@ -217,6 +221,70 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0 if all(r.status is TaskStatus.SUCCEEDED for r in results) else 1
 
 
+_SIM_CHOICES = ["bug", "security", "testing_maintainability"]
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Phase 4: three specialists in parallel under the orchestrator, state kept in SQLite."""
+    settings = Settings.from_env()
+    if args.test_mode:
+        settings = settings.model_copy(update={"test_mode": True})
+    if (args.simulate_delay or args.simulate_fail) and not settings.test_mode:
+        print("CONFIG ERROR: --simulate-delay/--simulate-fail require --test-mode", file=sys.stderr)
+        return 2
+    store = None
+    try:
+        provider = make_provider(settings)
+        if args.simulate_delay or args.simulate_fail:
+            provider = FaultInjectingProvider(provider, delay_s=args.simulate_delay, fail_specialists=args.simulate_fail)
+        ingest = ingest_repository(args.source, _INGEST_TYPES[args.type], settings, run_tools=False)
+        store = RunStore(settings.data_dir / "runs.db")
+        outcome = asyncio.run(Orchestrator(store, settings, provider).run(ingest, new_run=args.new_run))
+    except ConfigError as exc:
+        print(f"CONFIG ERROR: {exc}", file=sys.stderr)
+        return 2
+    except ValidationError as exc:
+        print("Invalid input:\n" + _format_errors(exc), file=sys.stderr)
+        return 2
+    except IngestError as exc:
+        print(f"INGEST FAILED: {exc}", file=sys.stderr)
+        return 1
+    except OrchestrationError as exc:
+        print(f"RUN REFUSED: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("Interrupted: unfinished tasks were marked cancelled; completed results were kept.", file=sys.stderr)
+        return 130
+    try:
+        if args.json:
+            print(json.dumps({"run_id": outcome.run_id, "status": outcome.status.value, "reused": outcome.reused}))
+        else:
+            print(format_run_report(store, outcome.run_id, reused=outcome.reused))
+    finally:
+        store.close()
+    return 0 if outcome.status.value == "completed" else 1
+
+
+def _cmd_inspect(args: argparse.Namespace) -> int:
+    settings = Settings.from_env()
+    db = settings.data_dir / "runs.db"
+    if not db.exists():
+        print(f"no run database at {db}", file=sys.stderr)
+        return 1
+    store = RunStore(db)
+    try:
+        if not args.run_id:
+            print(format_run_list(store))
+            return 0
+        if store.get_run(args.run_id) is None:
+            print(f"unknown run {args.run_id}", file=sys.stderr)
+            return 1
+        print(format_run_report(store, args.run_id, events=args.events))
+        return 0
+    finally:
+        store.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="reviewharness", description="Multi-agent repository review harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -243,6 +311,22 @@ def build_parser() -> argparse.ArgumentParser:
     rv.add_argument("--test-mode", action="store_true", help="use the deterministic fake provider (no API key)")
     rv.add_argument("--json", action="store_true", help="print results as JSON")
     rv.set_defaults(func=_cmd_review)
+
+    rn = sub.add_parser("run", help="run all three specialists in parallel and record the run in SQLite")
+    rn.add_argument("source", help="GitHub URL, .zip file or local folder")
+    rn.add_argument("--type", choices=sorted(_INGEST_TYPES), default="auto", help="input type (default: auto-detect)")
+    rn.add_argument("--test-mode", action="store_true", help="use the deterministic fake provider (no API key)")
+    rn.add_argument("--new-run", action="store_true", help="start a new run even if an identical one exists")
+    rn.add_argument("--simulate-delay", type=float, default=0.0, metavar="SECONDS", help="(test mode) add latency to every model call")
+    rn.add_argument("--simulate-fail", action="append", default=[], choices=_SIM_CHOICES, metavar="SPECIALIST",
+                    help="(test mode) make this specialist's provider calls fail; repeatable")
+    rn.add_argument("--json", action="store_true", help="print only run id and status as JSON")
+    rn.set_defaults(func=_cmd_run)
+
+    ins = sub.add_parser("inspect", help="show a recorded run (or list runs when no id is given)")
+    ins.add_argument("run_id", nargs="?")
+    ins.add_argument("--events", action="store_true", help="include the full event history")
+    ins.set_defaults(func=_cmd_inspect)
     return parser
 
 

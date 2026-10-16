@@ -177,3 +177,31 @@ class ScriptedProvider:
         if isinstance(item, LLMResult):
             return item
         return LLMResult(text=item, prompt_tokens=10, completion_tokens=5)
+
+
+class FaultInjectingProvider:
+    """Wraps another provider for demos/tests: adds latency and fails chosen specialists.
+
+    Used only with test mode (CLI --simulate-delay / --simulate-fail) to show concurrency
+    and partial-failure handling without a real outage.
+    """
+
+    def __init__(self, inner, *, delay_s: float = 0.0, fail_specialists: Sequence[str] = ()) -> None:
+        self._inner = inner
+        self._delay_s = delay_s
+        self._fail = frozenset(fail_specialists)
+        self.name = f"{inner.name}+faults"
+        self.model = inner.model
+
+    def complete(self, system: str, user: str) -> LLMResult:
+        import time
+
+        from reviewharness.llm.base import LLMPermanentError
+
+        match = _SPECIALIST.search(user)
+        specialist = match.group(1) if match else ""
+        if self._delay_s:
+            time.sleep(self._delay_s)
+        if specialist in self._fail:
+            raise LLMPermanentError(f"simulated provider failure for {specialist}")
+        return self._inner.complete(system, user)
